@@ -291,7 +291,7 @@ if __name__ == "__main__":
         tags_chinese=res[1].replace(' |', ',')
 
         print("Image Tags: ", res[0])
-        print("图像标签: ", res[1])
+        # print("Chi Tags ", res[1])
 
         # run grounding dino model
         boxes_filt, scores, pred_phrases = get_grounding_output(
