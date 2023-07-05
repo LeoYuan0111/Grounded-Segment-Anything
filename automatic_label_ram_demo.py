@@ -172,15 +172,15 @@ def save_mask_data(output_dir, tags_chinese, mask_list, box_list, label_list):
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser("Grounded-Segment-Anything Demo", add_help=True)
-    parser.add_argument("--config", type=str, required=True, help="path to config file")
+    parser.add_argument("--config", type=str, required=True, default="GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py", help="path to config file")
     parser.add_argument(
-        "--ram_checkpoint", type=str, required=True, help="path to checkpoint file"
+        "--ram_checkpoint", type=str, required=True, default="", help="path to checkpoint file"
     )
     parser.add_argument(
-        "--grounded_checkpoint", type=str, required=True, help="path to checkpoint file"
+        "--grounded_checkpoint", type=str, required=True, default="./checkpoints/groundingdino_swint_ogc.pth", help="path to checkpoint file"
     )
     parser.add_argument(
-        "--sam_checkpoint", type=str, required=True, help="path to checkpoint file"
+        "--sam_checkpoint", type=str, required=True, default="./checkpoints/sam_vit_h_4b8939", help="path to checkpoint file"
     )
     parser.add_argument(
         "--sam_hq_checkpoint", type=str, default=None, help="path to sam-hq checkpoint file"
@@ -188,7 +188,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--use_sam_hq", action="store_true", help="using sam-hq for prediction"
     )
-    parser.add_argument("--input_image", type=str, required=True, help="path to image file")
+    parser.add_argument("--input_image", type=str, required=True, default="example.jpg", help="path to image file")
     parser.add_argument("--split", default=",", type=str, help="split for text prompt")
     parser.add_argument("--openai_key", type=str, help="key for chatgpt")
     parser.add_argument("--openai_proxy", default=None, type=str, help="proxy for chatgpt")
@@ -225,24 +225,14 @@ if __name__ == "__main__":
     # if openai_proxy:
         # openai.proxy = {"http": openai_proxy, "https": openai_proxy}
 
-    # make dir
-    os.makedirs(output_dir, exist_ok=True)
-    # load image
-    image_pil, image = load_image(image_path)
-    # load model
-    model = load_model(config_file, grounded_checkpoint, device=device)
+    if not image_path.endswith('.jpg') and not image_path.endswith('.png'): # if image_path is a directory
+        # extract all images in the directory and construct the for loop
+        paths2images = []
+        for filename in os.listdir(image_path):
+            if filename.endswith('.jpg') or filename.endswith('.png'):     
+                file_path = os.path.join(image_path, filename)  
+                paths2images.append(file_path)
 
-    # visualize raw image
-    image_pil.save(os.path.join(output_dir, "raw_image.jpg"))
-
-    # initialize Recognize Anything Model
-    normalize = TS.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
-    transform = TS.Compose([
-                    TS.Resize((384, 384)),
-                    TS.ToTensor(), normalize
-                ])
-    
     # load model
     ram_model = tag2text.ram(pretrained=ram_checkpoint,
                                         image_size=384,
@@ -250,76 +240,119 @@ if __name__ == "__main__":
     # threshold for tagging
     # we reduce the threshold to obtain more tags
     ram_model.eval()
-
     ram_model = ram_model.to(device)
-    raw_image = image_pil.resize(
-                    (384, 384))
-    raw_image  = transform(raw_image).unsqueeze(0).to(device)
-
-    res = inference_ram.inference(raw_image , ram_model)
-
-    # Currently ", " is better for detecting single tags
-    # while ". " is a little worse in some case
-    tags=res[0].replace(' |', ',')
-    tags_chinese=res[1].replace(' |', ',')
-
-    print("Image Tags: ", res[0])
-    print("图像标签: ", res[1])
-
-    # run grounding dino model
-    boxes_filt, scores, pred_phrases = get_grounding_output(
-        model, image, tags, box_threshold, text_threshold, device=device
-    )
-
+    
     # initialize SAM
     if use_sam_hq:
         print("Initialize SAM-HQ Predictor")
         predictor = SamPredictor(build_sam_hq(checkpoint=sam_hq_checkpoint).to(device))
     else:
         predictor = SamPredictor(build_sam(checkpoint=sam_checkpoint).to(device))
-    image = cv2.imread(image_path)
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    predictor.set_image(image)
-
-    size = image_pil.size
-    H, W = size[1], size[0]
-    for i in range(boxes_filt.size(0)):
-        boxes_filt[i] = boxes_filt[i] * torch.Tensor([W, H, W, H])
-        boxes_filt[i][:2] -= boxes_filt[i][2:] / 2
-        boxes_filt[i][2:] += boxes_filt[i][:2]
-
-    boxes_filt = boxes_filt.cpu()
-    # use NMS to handle overlapped boxes
-    print(f"Before NMS: {boxes_filt.shape[0]} boxes")
-    nms_idx = torchvision.ops.nms(boxes_filt, scores, iou_threshold).numpy().tolist()
-    boxes_filt = boxes_filt[nms_idx]
-    pred_phrases = [pred_phrases[idx] for idx in nms_idx]
-    print(f"After NMS: {boxes_filt.shape[0]} boxes")
-    tags_chinese = check_tags_chinese(tags_chinese, pred_phrases)
-    print(f"Revise tags_chinese with number: {tags_chinese}")
-
-    transformed_boxes = predictor.transform.apply_boxes_torch(boxes_filt, image.shape[:2]).to(device)
-
-    masks, _, _ = predictor.predict_torch(
-        point_coords = None,
-        point_labels = None,
-        boxes = transformed_boxes.to(device),
-        multimask_output = False,
-    )
     
-    # draw output image
-    plt.figure(figsize=(10, 10))
-    plt.imshow(image)
-    for mask in masks:
-        show_mask(mask.cpu().numpy(), plt.gca(), random_color=True)
-    for box, label in zip(boxes_filt, pred_phrases):
-        show_box(box.numpy(), plt.gca(), label)
+    # from pdb import set_trace; set_trace()
+    
+    
+    # annotate each image
+    for image_path in paths2images:
+       
+        # make output dir
+        directory_path, filename = os.path.split(image_path)
+        file_name, file_extension = os.path.splitext(filename)
+        dir_name = file_name.replace(".jpg", "")  
+        output_dir = os.path.join(directory_path, dir_name) 
+        os.makedirs(output_dir, exist_ok=True)
+        # from pdb import set_trace; set_trace()
+        
+        # load image
+        image_pil, image = load_image(image_path)
+        # load model
+        model = load_model(config_file, grounded_checkpoint, device=device)
 
-    # plt.title('RAM-tags' + tags + '\n' + 'RAM-tags_chineseing: ' + tags_chinese + '\n')
-    plt.axis('off')
-    plt.savefig(
-        os.path.join(output_dir, "automatic_label_output.jpg"), 
-        bbox_inches="tight", dpi=300, pad_inches=0.0
-    )
+        # visualize raw image
+        image_pil.save(os.path.join(output_dir, "raw_image.jpg"))
 
-    save_mask_data(output_dir, tags_chinese, masks, boxes_filt, pred_phrases)
+        # initialize Recognize Anything Model
+        normalize = TS.Normalize(mean=[0.485, 0.456, 0.406],
+                                        std=[0.229, 0.224, 0.225])
+        transform = TS.Compose([
+                        TS.Resize((384, 384)),
+                        TS.ToTensor(), normalize
+                    ])
+        
+        raw_image = image_pil.resize(
+                        (384, 384))
+        raw_image  = transform(raw_image).unsqueeze(0).to(device)
+
+        res = inference_ram.inference(raw_image , ram_model)
+
+        # Currently ", " is better for detecting single tags
+        # while ". " is a little worse in some case
+        tags=res[0].replace(' |', ',')
+        tags_chinese=res[1].replace(' |', ',')
+
+        print("Image Tags: ", res[0])
+        print("图像标签: ", res[1])
+
+        # run grounding dino model
+        boxes_filt, scores, pred_phrases = get_grounding_output(
+            model, image, tags, box_threshold, text_threshold, device=device
+        )
+
+        image = cv2.imread(image_path)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        predictor.set_image(image)
+
+        size = image_pil.size
+        H, W = size[1], size[0]
+        for i in range(boxes_filt.size(0)):
+            boxes_filt[i] = boxes_filt[i] * torch.Tensor([W, H, W, H])
+            boxes_filt[i][:2] -= boxes_filt[i][2:] / 2
+            boxes_filt[i][2:] += boxes_filt[i][:2]
+
+        boxes_filt = boxes_filt.cpu()
+        # use NMS to handle overlapped boxes
+        print(f"Before NMS: {boxes_filt.shape[0]} boxes")
+        nms_idx = torchvision.ops.nms(boxes_filt, scores, iou_threshold).numpy().tolist()
+        boxes_filt = boxes_filt[nms_idx]
+        pred_phrases = [pred_phrases[idx] for idx in nms_idx]
+        print(f"After NMS: {boxes_filt.shape[0]} boxes")
+        tags_chinese = check_tags_chinese(tags_chinese, pred_phrases)
+        print(f"Revise tags_chinese with number: {tags_chinese}")
+
+        transformed_boxes = predictor.transform.apply_boxes_torch(boxes_filt, image.shape[:2]).to(device)
+
+        masks, _, _ = predictor.predict_torch(
+            point_coords = None,
+            point_labels = None,
+            boxes = transformed_boxes.to(device),
+            multimask_output = False,
+        )
+        
+        # save each mask as png file
+        h, w, _ = image.shape
+        for i, mask in enumerate(masks):
+            mask = mask[0].cpu().numpy()
+            mask = mask.astype(np.uint8)
+            mask = mask.reshape(h, w)
+            mask *= 255
+            Image.fromarray(mask).save(os.path.join(output_dir, "mask" + str(i) + ".png"))
+            
+        
+        # from pdb import set_trace; set_trace()
+        
+        # draw output image
+        plt.figure(figsize=(10, 10))
+        plt.imshow(image)
+        for mask in masks:
+            show_mask(mask.cpu().numpy(), plt.gca(), random_color=True)
+        for box, label in zip(boxes_filt, pred_phrases):
+            show_box(box.numpy(), plt.gca(), label)
+
+        # plt.title('RAM-tags' + tags + '\n' + 'RAM-tags_chineseing: ' + tags_chinese + '\n')
+        plt.axis('off')
+        plt.savefig(
+            os.path.join(output_dir, "automatic_label_output.jpg"), 
+            bbox_inches="tight", dpi=300, pad_inches=0.0
+        )
+
+        save_mask_data(output_dir, tags_chinese, masks, boxes_filt, pred_phrases)
